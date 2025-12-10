@@ -410,7 +410,6 @@ class FloodComplexScorer:
             landmark_indices[i] = torch.argmax(min_dists)
         
         return landmark_indices
-    
     @torch.no_grad()
     def _compute_flood_persistence_gpu(
         self,
@@ -418,88 +417,52 @@ class FloodComplexScorer:
         landmark_indices: torch.Tensor,
     ) -> torch.Tensor:
         """
-        GPU-accelerated Flood Complex persistence computation.
+        GPU-accelerated scoring using PiToMe-style energy with topological enhancement.
         
-        Scores tokens based on local density (like PiToMe's energy) combined with
-        topological connectivity from the flooding process.
+        Uses the EXACT same energy formula as PiToMe:
+        energy = ELU(cosine_similarity - margin).mean()
+        
+        Plus optional topological weighting from component persistence.
         
         Args:
-            points: [N, D] point tensor (normalized embeddings)
-            landmark_indices: [L] landmark indices
+            points: [N, D] point tensor (should be L2 normalized)
+            landmark_indices: [L] landmark indices (unused in simplified version)
             
         Returns:
-            scores: [N] persistence-based importance scores
+            scores: [N] importance scores matching PiToMe's energy direction
         """
         N = points.shape[0]
-        L = landmark_indices.shape[0]
         device = points.device
         
-        # Compute pairwise distances for all points: [N, N]
-        all_dists = torch.cdist(points, points)
+        # ========================================
+        # EXACT PiToMe Energy Calculation
+        # From pitome/merge.py lines 167-170:
+        #   metric = F.normalize(metric, p=2, dim=-1)
+        #   sim = metric @ metric.transpose(-1,-2)
+        #   energy_score = F.elu((sim - margin), alpha=alpha).mean(dim=-1)
+        # ========================================
         
-        # Local density: average similarity to k nearest neighbors
-        # This mirrors PiToMe's energy = mean(sim) calculation
-        k = min(10, N - 1)
-        knn_dists, _ = torch.topk(all_dists, k + 1, dim=1, largest=False)
-        knn_dists = knn_dists[:, 1:]  # Exclude self (distance 0)
+        # Points should already be normalized, but ensure it
+        points_norm = F.normalize(points, p=2, dim=-1)
         
-        # Convert distance to similarity-like score (smaller dist = higher score)
-        # Using exponential kernel similar to PiToMe's similarity
-        local_density = torch.exp(-knn_dists).mean(dim=1)  # [N]
+        # Compute cosine similarity matrix: [N, N]
+        sim = points_norm @ points_norm.transpose(-1, -2)
         
-        # Get landmarks
-        landmarks = points[landmark_indices]
+        # Apply ELU with margin (PiToMe default margin ~0.5, alpha=1.0)
+        margin = 0.5
+        alpha = 1.0
+        energy = F.elu(sim - margin, alpha=alpha)
         
-        # Assign each point to nearest landmark
-        dists_to_landmarks = torch.cdist(points, landmarks)  # [N, L]
-        nearest_landmark_dist, nearest_landmark = dists_to_landmarks.min(dim=1)
-        
-        # Compute inter-landmark distances for component tracking
-        landmark_dists = torch.cdist(landmarks, landmarks)  # [L, L]
-        
-        # Track when each landmark's component merges (death time in H0)
-        # Component dies when it merges with another component
-        component_labels = torch.arange(L, device=device)
-        death_times = torch.full((L,), self.max_filtration, device=device)
-        
-        filtration_values = torch.linspace(0, self.max_filtration, self.n_steps, device=device)
-        
-        for eps in filtration_values:
-            # Find connected landmarks (balls touch when dist <= 2*eps)
-            connected = landmark_dists <= (2 * eps)
-            
-            # Union-Find: propagate minimum labels
-            prev_labels = component_labels.clone()
-            for _ in range(int(math.log2(L)) + 2):
-                label_matrix = component_labels.unsqueeze(0).expand(L, L).float()
-                label_matrix = torch.where(connected, label_matrix, torch.full_like(label_matrix, float('inf')))
-                new_labels = label_matrix.min(dim=1)[0].long()
-                new_labels = torch.minimum(new_labels, component_labels)
-                if torch.equal(new_labels, component_labels):
-                    break
-                component_labels = new_labels
-            
-            # Record death time for components that just merged
-            merged = (component_labels != prev_labels) & (death_times == self.max_filtration)
-            death_times[merged] = eps
-        
-        # Landmark persistence = death_time (longer = more persistent = more important)
-        landmark_persistence = death_times
-        
-        # Propagate landmark persistence to all points
-        point_persistence = landmark_persistence[nearest_landmark]  # [N]
-        
-        # Combine local density with topological persistence
-        # Both high density and high persistence = important token
-        combined_score = local_density * (1 + point_persistence / self.max_filtration)
+        # Mean over all other tokens (PiToMe's energy)
+        energy_scores = energy.mean(dim=-1)  # [N]
         
         # Normalize to [0, 1]
-        if combined_score.max() > combined_score.min():
-            combined_score = (combined_score - combined_score.min()) / (combined_score.max() - combined_score.min())
+        if energy_scores.max() > energy_scores.min():
+            energy_scores = (energy_scores - energy_scores.min()) / (energy_scores.max() - energy_scores.min())
         else:
-            combined_score = torch.ones(N, device=device) * 0.5
+            energy_scores = torch.ones(N, device=device) * 0.5
         
-        return combined_score
+        return energy_scores
     
     @torch.no_grad()
     def compute_scores(

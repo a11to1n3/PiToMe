@@ -420,12 +420,11 @@ class FloodComplexScorer:
         """
         GPU-accelerated Flood Complex persistence computation.
         
-        The flooding process simulates the growth of balls around each point.
-        Components merge when balls touch, creating a persistence diagram.
-        We track which points contribute to long-lived components.
+        Scores tokens based on local density (like PiToMe's energy) combined with
+        topological connectivity from the flooding process.
         
         Args:
-            points: [N, D] point tensor
+            points: [N, D] point tensor (normalized embeddings)
             landmark_indices: [L] landmark indices
             
         Returns:
@@ -435,84 +434,72 @@ class FloodComplexScorer:
         L = landmark_indices.shape[0]
         device = points.device
         
+        # Compute pairwise distances for all points: [N, N]
+        all_dists = torch.cdist(points, points)
+        
+        # Local density: average similarity to k nearest neighbors
+        # This mirrors PiToMe's energy = mean(sim) calculation
+        k = min(10, N - 1)
+        knn_dists, _ = torch.topk(all_dists, k + 1, dim=1, largest=False)
+        knn_dists = knn_dists[:, 1:]  # Exclude self (distance 0)
+        
+        # Convert distance to similarity-like score (smaller dist = higher score)
+        # Using exponential kernel similar to PiToMe's similarity
+        local_density = torch.exp(-knn_dists).mean(dim=1)  # [N]
+        
+        # Get landmarks
         landmarks = points[landmark_indices]
         
-        # Compute distances from all points to landmarks: [N, L]
-        dists_to_landmarks = torch.cdist(points, landmarks)
-        
         # Assign each point to nearest landmark
+        dists_to_landmarks = torch.cdist(points, landmarks)  # [N, L]
         nearest_landmark_dist, nearest_landmark = dists_to_landmarks.min(dim=1)
         
-        # Compute inter-landmark distances: [L, L]
-        landmark_dists = torch.cdist(landmarks, landmarks)
+        # Compute inter-landmark distances for component tracking
+        landmark_dists = torch.cdist(landmarks, landmarks)  # [L, L]
         
-        # Filtration values (discrete steps)
-        filtration_values = torch.linspace(
-            0, self.max_filtration, self.n_steps, device=device
-        )
-        
-        # Initialize component labels (each landmark is its own component)
+        # Track when each landmark's component merges (death time in H0)
+        # Component dies when it merges with another component
         component_labels = torch.arange(L, device=device)
+        death_times = torch.full((L,), self.max_filtration, device=device)
         
-        # Track birth times for each component
-        birth_times = torch.zeros(L, device=device)
+        filtration_values = torch.linspace(0, self.max_filtration, self.n_steps, device=device)
         
-        # Track persistence mass for each point
-        point_persistence = torch.zeros(N, device=device)
-        
-        # Flooding process: simulate ball growth
-        for step_idx, eps in enumerate(filtration_values):
-            # Find which landmark pairs are connected at this radius
-            # Two landmarks connect when their distance <= 2*eps (balls touch)
+        for eps in filtration_values:
+            # Find connected landmarks (balls touch when dist <= 2*eps)
             connected = landmark_dists <= (2 * eps)
             
-            # Union-Find style component merging (simplified for GPU)
-            # For each landmark, find minimum component label among connected landmarks
-            connected_float = connected.float()
-            connected_float[~connected] = float('inf')
-            
-            # Add self-connections
-            connected_float.fill_diagonal_(0)
-            
-            # Propagate labels (simplified: take minimum connected label)
-            for _ in range(int(math.log2(L)) + 1):  # Log iterations for convergence
-                # For each component, find minimum label among connected components
+            # Union-Find: propagate minimum labels
+            prev_labels = component_labels.clone()
+            for _ in range(int(math.log2(L)) + 2):
                 label_matrix = component_labels.unsqueeze(0).expand(L, L).float()
                 label_matrix = torch.where(connected, label_matrix, torch.full_like(label_matrix, float('inf')))
                 new_labels = label_matrix.min(dim=1)[0].long()
                 new_labels = torch.minimum(new_labels, component_labels)
-                
                 if torch.equal(new_labels, component_labels):
                     break
                 component_labels = new_labels
             
-            # Calculate persistence contribution at this step
-            # Points whose landmark is in a long-lived component get higher scores
-            delta_eps = self.max_filtration / self.n_steps
-            
-            # Points that are within eps of their landmark are "active"
-            active_points = nearest_landmark_dist <= eps
-            
-            # Contribution is proportional to step index (later = more important)
-            point_persistence[active_points] += delta_eps
+            # Record death time for components that just merged
+            merged = (component_labels != prev_labels) & (death_times == self.max_filtration)
+            death_times[merged] = eps
         
-        # Compute final component sizes for weighting
-        point_components = component_labels[nearest_landmark]
-        unique_components = torch.unique(point_components)
+        # Landmark persistence = death_time (longer = more persistent = more important)
+        landmark_persistence = death_times
         
-        for comp in unique_components:
-            mask = point_components == comp
-            comp_size = mask.sum().float()
-            # Larger components = more topologically significant
-            point_persistence[mask] *= torch.log1p(comp_size)
+        # Propagate landmark persistence to all points
+        point_persistence = landmark_persistence[nearest_landmark]  # [N]
+        
+        # Combine local density with topological persistence
+        # Both high density and high persistence = important token
+        combined_score = local_density * (1 + point_persistence / self.max_filtration)
         
         # Normalize to [0, 1]
-        if point_persistence.max() > 0:
-            point_persistence = point_persistence / point_persistence.max()
+        if combined_score.max() > combined_score.min():
+            combined_score = (combined_score - combined_score.min()) / (combined_score.max() - combined_score.min())
         else:
-            point_persistence = torch.ones(N, device=device) / N
+            combined_score = torch.ones(N, device=device) * 0.5
         
-        return point_persistence
+        return combined_score
     
     @torch.no_grad()
     def compute_scores(

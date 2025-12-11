@@ -2,4 +2,6 @@
 # Patch module for timm Vision Transformers
 
 from .deit import apply_patch as deit
-from .timm import apply_patch as timm
+
+# timm.py contains internal classes (TDAPiToMeBlock, TDAPiToMeAttention)
+# used by deit.py - no apply_patch function there

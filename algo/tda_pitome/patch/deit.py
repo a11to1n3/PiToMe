@@ -70,6 +70,7 @@ def apply_patch(
     use_fast_scorer: bool = False,
     use_flood_scorer: bool = True,  # Default to GPU-accelerated FloodComplex
     scorer_kwargs: dict = None,
+    alpha: float = 0.3,  # 0.0 ≈ PiToMe density-only, 1.0 = pure persistence
 ):
     """
     Apply TDA-PiToMe patch to a Vision Transformer model.
@@ -83,6 +84,7 @@ def apply_patch(
         scorer_kwargs: Additional kwargs for the scorer
     """
     scorer_kwargs = scorer_kwargs or {}
+    scorer_kwargs.setdefault("alpha", alpha)
     
     # Create patched class
     TDAPiToMeVisionTransformer = make_tda_pitome_class(model.__class__)
@@ -136,4 +138,3 @@ def apply_patch(
             current_layer += 1
         elif isinstance(module, Attention):
             module.__class__ = TDAPiToMeAttention
-

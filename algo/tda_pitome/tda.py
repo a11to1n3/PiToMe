@@ -351,6 +351,7 @@ class FloodComplexScorer:
         max_filtration_value: float = 2.0,
         n_filtration_steps: int = 50,
         device: str = None,
+        alpha: float = 0.3,
     ):
         """
         Args:
@@ -358,11 +359,13 @@ class FloodComplexScorer:
             max_filtration_value: Maximum distance for the filtration
             n_filtration_steps: Number of discrete steps in the filtration (more = finer resolution)
             device: Device for computation ('cuda', 'cpu', or None for auto)
+            alpha: Weight on persistence vs density (0.0 ≈ PiToMe density-only, 1.0 = pure persistence)
         """
         self.landmark_fraction = landmark_fraction
         self.max_filtration = max_filtration_value
         self.n_steps = n_filtration_steps
         self.device = device
+        self.alpha = alpha
     
     def _get_device(self, embeddings: torch.Tensor) -> torch.device:
         """Determine computation device."""
@@ -498,8 +501,7 @@ class FloodComplexScorer:
         # Combined score: density dominates (for PiToMe correlation), persistence modulates
         # alpha = 0 gives pure density (should correlate highly with PiToMe)
         # alpha = 1 gives pure persistence (captures different topological info)
-        alpha = 0.3  # Mostly density-based for good PiToMe correlation
-        combined_score = (1 - alpha) * density_norm + alpha * pers_norm
+        combined_score = (1 - self.alpha) * density_norm + self.alpha * pers_norm
         
         # Final normalization
         if combined_score.max() > combined_score.min():
@@ -573,4 +575,3 @@ class FloodComplexScorer:
             return result.cpu().numpy()
         
         return result
-

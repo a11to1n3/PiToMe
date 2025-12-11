@@ -11,6 +11,7 @@ import torch.nn as nn
 from timm.models.vision_transformer import Attention, Block
 
 from ..merge import tda_pitome_vision, merge_source, merge_wavg, prune
+from ...pitome.merge import pitome_vision
 from ..tda import TopologicalScorer, FastTopologicalScorer, FloodComplexScorer
 
 
@@ -51,20 +52,31 @@ class TDAPiToMeBlock(Block):
         ratio = self._info["ratio"].pop(0)
         
         if ratio < 1.0:
-            # Recompute scores on the current token set each block to align with merges
-            cached_scores = None
-            if hasattr(self, "scorer") and self.scorer is not None:
-                with torch.no_grad():
-                    cached_scores = self.scorer.compute_scores(metric)
-                    self._info["tda_scores"] = cached_scores
-            
-            merge = tda_pitome_vision(
-                ratio=ratio,
-                metric=metric,
-                class_token=self._info["class_token"],
-                scorer=None,  # Don't pass scorer since we use cached scores
-                cached_scores=cached_scores,
-            )
+            scoring_mode = self._info.get("scoring_mode", "tda")
+
+            if scoring_mode == "pitome":
+                # Exact PiToMe energy scoring (generalization knob)
+                merge = pitome_vision(
+                    metric=metric,
+                    ratio=ratio,
+                    margin=getattr(self, "margin", 0.5),
+                    class_token=self._info["class_token"],
+                )
+            else:
+                # Recompute TDA scores on the current token set each block
+                cached_scores = None
+                if hasattr(self, "scorer") and self.scorer is not None:
+                    with torch.no_grad():
+                        cached_scores = self.scorer.compute_scores(metric)
+                        self._info["tda_scores"] = cached_scores
+
+                merge = tda_pitome_vision(
+                    ratio=ratio,
+                    metric=metric,
+                    class_token=self._info["class_token"],
+                    scorer=None,  # Don't pass scorer since we use cached scores
+                    cached_scores=cached_scores,
+                )
             
             # Track sources if requested
             if self._info["trace_source"]:

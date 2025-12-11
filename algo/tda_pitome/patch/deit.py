@@ -71,6 +71,7 @@ def apply_patch(
     use_flood_scorer: bool = True,  # Default to GPU-accelerated FloodComplex
     scorer_kwargs: dict = None,
     alpha: float = 0.3,  # 0.0 ≈ PiToMe density-only, 1.0 = pure persistence
+    scoring_mode: str = "tda",  # "pitome" for exact PiToMe energy, "tda" for PH-based
 ):
     """
     Apply TDA-PiToMe patch to a Vision Transformer model.
@@ -105,6 +106,7 @@ def apply_patch(
         "class_token": model.cls_token is not None,
         "distill_token": False,
         "tda_scores": None,  # Will be computed once per forward pass
+        "scoring_mode": scoring_mode,
     }
     
     # Initialize model-level TDA scorer (computed once, not per-block)

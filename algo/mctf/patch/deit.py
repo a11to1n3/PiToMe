@@ -26,7 +26,7 @@ def make_tome_class(transformer_class):
                 return x
 
 
-        def forward_features(self, x):
+        def forward_features(self, x, **kwargs):
             x = self.patch_embed(x)
             cls_token = self.cls_token.expand(x.shape[0], -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
             if self.dist_token is None:

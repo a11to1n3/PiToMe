@@ -51,20 +51,12 @@ class TDAPiToMeBlock(Block):
         ratio = self._info["ratio"].pop(0)
         
         if ratio < 1.0:
-            # ========================================
-            # COMPUTE TDA SCORES ONCE (on first block only)
-            # This is the key optimization - compute O(N²) operation once
-            # ========================================
-            cached_scores = self._info.get("tda_scores", None)
-            
-            if cached_scores is None and hasattr(self, 'scorer') and self.scorer is not None:
-                # First block: compute and cache scores
+            # Recompute scores on the current token set each block to align with merges
+            cached_scores = None
+            if hasattr(self, "scorer") and self.scorer is not None:
                 with torch.no_grad():
-                    # Use current metric (keys) for scoring
-                    # Exclude CLS token if present
-                    scoring_metric = metric
-                    self._info["tda_scores"] = self.scorer.compute_scores(scoring_metric)
-                cached_scores = self._info["tda_scores"]
+                    cached_scores = self.scorer.compute_scores(metric)
+                    self._info["tda_scores"] = cached_scores
             
             merge = tda_pitome_vision(
                 ratio=ratio,

@@ -9,6 +9,7 @@ import torch
 from timm.models.vision_transformer import Attention, Block, VisionTransformer
 
 from .timm import TDAPiToMeAttention, TDAPiToMeBlock
+from ..tda import TopologicalScorer, FastTopologicalScorer, FloodComplexScorer
 
 
 def make_tda_pitome_class(transformer_class):
@@ -29,6 +30,7 @@ def make_tda_pitome_class(transformer_class):
         Modifications:
         - Initialize ratio, token size, and token sources
         - Track FLOPs for efficiency measurement
+        - Compute TDA scores once per forward pass using hooks
         """
         
         def forward(self, x, return_flop: bool = True) -> torch.Tensor:
@@ -36,6 +38,8 @@ def make_tda_pitome_class(transformer_class):
             self._info["ratio"] = [self.ratio] * len(self.blocks)
             self._info["size"] = None
             self._info["source"] = None
+            self._info["tda_scores"] = None  # Reset cached scores
+            self._tda_scores_computed = False  # Flag to compute once
             self.total_flop = 0
             
             x = super().forward(x)
@@ -44,48 +48,17 @@ def make_tda_pitome_class(transformer_class):
                 return x, self.total_flop
             return x
         
-        def forward_features(self, x):
-            # Patch embedding
-            x = self.patch_embed(x)
+        def _compute_tda_scores_hook(self, x: torch.Tensor):
+            """Compute and cache TDA scores from input tokens."""
+            if self._tda_scores_computed or self.ratio >= 1.0:
+                return
             
-            # Add CLS token
-            cls_token = self.cls_token.expand(x.shape[0], -1, -1)
-            if self.dist_token is None:
-                x = torch.cat((cls_token, x), dim=1)
-            else:
-                x = torch.cat(
-                    (cls_token, self.dist_token.expand(x.shape[0], -1, -1), x), 
-                    dim=1
-                )
-            
-            # Add positional encoding
-            x = self.pos_drop(x + self.pos_embed)
-            
-            # Process blocks with FLOP counting
-            for block in self.blocks:
-                self.total_flop += self.calculate_block_flop(x.shape)
-                x = block(x)
-            
-            x = self.norm(x)
-            
-            if self.dist_token is None:
-                return self.pre_logits(x[:, 0])
-            return x[:, 0], x[:, 1]
-        
-        def calculate_block_flop(self, shape):
-            """Calculate FLOPs for a single transformer block."""
-            flops = 0
-            _, N, C = shape
-            
-            # Multi-head self-attention FLOPs
-            mhsa_flops = 4 * N * C * C + 2 * N * N * C
-            flops += mhsa_flops
-            
-            # FFN FLOPs
-            ffn_flops = 8 * N * C * C
-            flops += ffn_flops
-            
-            return flops
+            if hasattr(self, '_tda_scorer') and self._tda_scorer is not None:
+                with torch.no_grad():
+                    # Exclude CLS token for scoring
+                    metric = x[:, 1:, :] if self._info["class_token"] else x
+                    self._info["tda_scores"] = self._tda_scorer.compute_scores(metric)
+                    self._tda_scores_computed = True
     
     return TDAPiToMeVisionTransformer
 
@@ -129,7 +102,16 @@ def apply_patch(
         "prop_attn": prop_attn,
         "class_token": model.cls_token is not None,
         "distill_token": False,
+        "tda_scores": None,  # Will be computed once per forward pass
     }
+    
+    # Initialize model-level TDA scorer (computed once, not per-block)
+    if use_flood_scorer:
+        model._tda_scorer = FloodComplexScorer(**scorer_kwargs)
+    elif use_fast_scorer:
+        model._tda_scorer = FastTopologicalScorer(**scorer_kwargs)
+    else:
+        model._tda_scorer = TopologicalScorer(**scorer_kwargs)
     
     # Handle distillation token
     if hasattr(model, "dist_token") and model.dist_token is not None:

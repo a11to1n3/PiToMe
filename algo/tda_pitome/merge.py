@@ -24,6 +24,7 @@ def tda_pitome_vision(
     threshold: float = 0.3,
     use_fast: bool = False,
     use_flood: bool = True,  # Default to GPU-accelerated FloodComplex
+    cached_scores: Optional[torch.Tensor] = None,  # Pre-computed scores for caching
 ) -> Callable:
     """
     TDA-based token merging for Vision Transformers.
@@ -40,6 +41,7 @@ def tda_pitome_vision(
         threshold: Topological score threshold below which tokens are merged
         use_fast: Use FastTopologicalScorer (Witness Complex, CPU)
         use_flood: Use FloodComplexScorer (GPU-accelerated, recommended)
+        cached_scores: Pre-computed topological scores [B, T] to skip expensive computation
         
     Returns:
         merge: Function that merges tokens given mode
@@ -62,18 +64,39 @@ def tda_pitome_vision(
         if r <= 0:
             return do_nothing
         
-        # Initialize scorer if needed (FloodComplex by default for GPU)
-        if scorer is None:
-            if use_flood:
-                scorer = FloodComplexScorer()
-            elif use_fast:
-                scorer = FastTopologicalScorer()
+        # ========================================
+        # USE CACHED SCORES IF AVAILABLE (key optimization)
+        # This avoids O(N²) recomputation per block
+        # ========================================
+        if cached_scores is not None:
+            # Adapt cached scores to current token count
+            # (token count decreases as we merge through layers)
+            if cached_scores.shape[1] >= T:
+                # Use first T scores (tokens are progressively merged)
+                # Note: This is an approximation - ideally we'd track which tokens remain
+                # But for speed, we use the initial ordering and truncate
+                topo_scores = cached_scores[:, :T]
             else:
-                scorer = TopologicalScorer()
+                # Cached scores are for fewer tokens than current (shouldn't happen normally)
+                # Fall back to computing scores
+                topo_scores = None
+        else:
+            topo_scores = None
         
-        # Compute topological importance scores
-        # Higher score = more important = should be preserved
-        topo_scores = scorer.compute_scores(metric)  # [B, T]
+        # Only compute scores if not cached
+        if topo_scores is None:
+            # Initialize scorer if needed (FloodComplex by default for GPU)
+            if scorer is None:
+                if use_flood:
+                    scorer = FloodComplexScorer()
+                elif use_fast:
+                    scorer = FastTopologicalScorer()
+                else:
+                    scorer = TopologicalScorer()
+            
+            # Compute topological importance scores
+            # Higher score = more important = should be preserved
+            topo_scores = scorer.compute_scores(metric)  # [B, T]
         
         # Sort tokens by topological importance (ascending)
         # Low-scoring tokens are merge candidates

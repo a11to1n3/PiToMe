@@ -29,8 +29,9 @@ def tda_pitome_vision(
     margin: float = 0.5,
     merge_strategy: str = "pairwise",  # "pairwise" (default, PiToMe-style) or "multiway" (n-way anchors)
     homology_dims: Optional[Union[int, tuple]] = None,  # Which homology dimensions to score (passed to scorer)
-    flood_landmark_fraction: Optional[float] = 0.05,  # Reduce landmark fraction for faster FloodComplex
-    flood_n_filtration_steps: Optional[int] = 30,  # Fewer filtration steps for speed
+    flood_landmark_fraction: Optional[float] = 0.025,  # Reduce landmark fraction for faster FloodComplex
+    flood_n_filtration_steps: Optional[int] = 20,  # Fewer filtration steps for speed
+    score_proj_dim: Optional[int] = None,  # Optional random projection dim for topo scoring (speeds up cdist)
 ) -> Callable:
     """
     TDA-based token merging for Vision Transformers.
@@ -66,6 +67,11 @@ def tda_pitome_vision(
             metric = metric[None, ...]
         
         B, T, C = metric.shape
+        metric_topo = metric
+        if score_proj_dim is not None and score_proj_dim < C:
+            proj = torch.randn(C, score_proj_dim, device=metric.device, dtype=metric.dtype)
+            metric_topo = metric @ proj
+            metric_topo = F.normalize(metric_topo, p=2, dim=-1)
         
         # Calculate number of tokens to merge
         r = math.floor(T - T * ratio)
@@ -108,7 +114,7 @@ def tda_pitome_vision(
             
             # Compute topological importance scores
             # Higher score = more important = should be preserved
-            topo_scores = scorer.compute_scores(metric)  # [B, T]
+            topo_scores = scorer.compute_scores(metric_topo)  # [B, T]
         
         # Normalize topo scores to [0, 1] for mixing with energy
         if topo_scores is not None:

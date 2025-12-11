@@ -256,5 +256,23 @@ class TestTDAGeneralizationTheorem:
         assert 1 not in kept_indices
         assert set(kept_indices) == {0, 2, 3, 4}
 
+
+class TestHybridPreset:
+    """Tests for the hybrid fast preset."""
+
+    def test_hybrid_returns_callable_and_reduces_tokens(self):
+        torch.manual_seed(0)
+        try:
+            from algo import tda_pitome
+        except ImportError:
+            pytest.skip("tda_pitome module unavailable")
+        if tda_pitome is None:
+            pytest.skip("tda_pitome module unavailable")
+
+        metric = torch.randn(1, 10, 8)
+        merge = tda_pitome.tda_pitome_hybrid(metric=metric, ratio=0.8)
+        x = torch.randn(1, 10, 8)
+        merged = merge(x)
+        assert merged.shape[1] < x.shape[1]
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

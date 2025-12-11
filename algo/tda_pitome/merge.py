@@ -347,6 +347,40 @@ def tda_bsm(
     return merge
 
 
+# --------------------------------------------------------
+# Convenience hybrid preset (PiToMe speed + slight topology)
+# --------------------------------------------------------
+def tda_pitome_hybrid(
+    metric: torch.Tensor,
+    ratio: float = 0.7,
+    class_token: bool = False,
+    energy_weight: float = 0.9,
+    merge_strategy: str = "pairwise",
+    use_flood: bool = True,
+    flood_landmark_fraction: float = 0.02,
+    flood_n_filtration_steps: int = 15,
+    score_proj_dim: int = 32,
+    homology_dims: Optional[Union[int, tuple]] = (0, 1),
+    cached_scores: Optional[torch.Tensor] = None,
+) -> Callable:
+    """
+    Fast hybrid preset leaning toward PiToMe speed with a small topological signal.
+    """
+    return tda_pitome_vision(
+        metric=metric,
+        ratio=ratio,
+        class_token=class_token,
+        energy_weight=energy_weight,
+        merge_strategy=merge_strategy,
+        use_flood=use_flood,
+        flood_landmark_fraction=flood_landmark_fraction,
+        flood_n_filtration_steps=flood_n_filtration_steps,
+        score_proj_dim=score_proj_dim,
+        homology_dims=homology_dims,
+        cached_scores=cached_scores,
+    )
+
+
 # Merge utility functions (same as PiToMe for compatibility)
 def merge_mean(merge: Callable, x: torch.Tensor) -> torch.Tensor:
     """Apply merge with mean aggregation."""

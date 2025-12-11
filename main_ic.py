@@ -30,11 +30,13 @@ from algo import (
     TOFU,
     DIFFRATE,
     NONE,
+    TDA_PITOME,
     pitome,
     dct,
     tome,
     tofu,
-    DiffRate
+    DiffRate,
+    tda_pitome,
 )
 import os
 from accelerate import Accelerator
@@ -50,7 +52,9 @@ ALGO = {
     DCT: dct,
     TOFU: tofu,
     NONE: tome,
+    TDA_PITOME: tda_pitome,
 }
+
 
 
 torch.hub.set_dir(f'{DATA_PATH}/.vision_ckts')

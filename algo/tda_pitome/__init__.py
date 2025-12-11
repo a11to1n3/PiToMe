@@ -3,5 +3,6 @@
 
 from .tda import TopologicalScorer, FastTopologicalScorer, FloodComplexScorer
 from .merge import tda_pitome_vision
+from . import patch
 
-__all__ = ["TopologicalScorer", "FastTopologicalScorer", "FloodComplexScorer", "tda_pitome_vision"]
+__all__ = ["TopologicalScorer", "FastTopologicalScorer", "FloodComplexScorer", "tda_pitome_vision", "patch"]

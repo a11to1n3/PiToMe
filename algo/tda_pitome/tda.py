@@ -352,6 +352,7 @@ class FloodComplexScorer:
         n_filtration_steps: int = 50,
         device: str = None,
         alpha: float = 0.3,
+        homology_dims=None,
     ):
         """
         Args:
@@ -360,12 +361,14 @@ class FloodComplexScorer:
             n_filtration_steps: Number of discrete steps in the filtration (more = finer resolution)
             device: Device for computation ('cuda', 'cpu', or None for auto)
             alpha: Weight on persistence vs density (0.0 ≈ PiToMe density-only, 1.0 = pure persistence)
+            homology_dims: Stored for API symmetry; not directly used in flood scoring
         """
         self.landmark_fraction = landmark_fraction
         self.max_filtration = max_filtration_value
         self.n_steps = n_filtration_steps
         self.device = device
         self.alpha = alpha
+        self.homology_dims = homology_dims
     
     def _get_device(self, embeddings: torch.Tensor) -> torch.device:
         """Determine computation device."""

@@ -28,6 +28,7 @@ def tda_pitome_vision(
     energy_weight: float = 0.0,  # 0 = pure topology, 1 = pure PiToMe energy (superset knob)
     margin: float = 0.5,
     merge_strategy: str = "pairwise",  # "pairwise" (default, PiToMe-style) or "multiway" (n-way anchors)
+    homology_dims: Optional[Union[int, tuple]] = None,  # Which homology dimensions to score (passed to scorer)
 ) -> Callable:
     """
     TDA-based token merging for Vision Transformers.
@@ -49,6 +50,8 @@ def tda_pitome_vision(
     Returns:
         merge: Function that merges tokens given mode
     """
+    energy_weight = max(0.0, min(1.0, float(energy_weight)))
+
     if ratio >= 1.0:
         return do_nothing
     
@@ -86,43 +89,44 @@ def tda_pitome_vision(
         else:
             topo_scores = None
         
-        # Only compute scores if not cached
-        if topo_scores is None:
+        # Only compute topological scores if needed and not cached
+        if topo_scores is None and energy_weight < 1.0:
             # Initialize scorer if needed (FloodComplex by default for GPU)
             if scorer is None:
                 if use_flood:
-                    scorer = FloodComplexScorer()
+                    scorer = FloodComplexScorer(homology_dims=homology_dims)
                 elif use_fast:
-                    scorer = FastTopologicalScorer()
+                    scorer = FastTopologicalScorer(homology_dims=homology_dims)
                 else:
-                    scorer = TopologicalScorer()
+                    scorer = TopologicalScorer(homology_dims=homology_dims)
             
             # Compute topological importance scores
             # Higher score = more important = should be preserved
             topo_scores = scorer.compute_scores(metric)  # [B, T]
         
         # Normalize topo scores to [0, 1] for mixing with energy
-        topo_min = topo_scores.min(dim=-1, keepdim=True)[0]
-        topo_max = topo_scores.max(dim=-1, keepdim=True)[0]
-        topo_norm = (topo_scores - topo_min) / (topo_max - topo_min + 1e-8)
+        if topo_scores is not None:
+            topo_min = topo_scores.min(dim=-1, keepdim=True)[0]
+            topo_max = topo_scores.max(dim=-1, keepdim=True)[0]
+            topo_denom = (topo_max - topo_min).clamp_min(1e-8)
+            topo_norm = (topo_scores - topo_min) / topo_denom
+        else:
+            topo_norm = torch.zeros((B, T), device=metric.device, dtype=metric.dtype)
 
-        # Optional PiToMe energy scores for generalization
-        energy_norm = None
-        ew = max(0.0, min(1.0, float(energy_weight)))
-        if ew > 0.0:
-            metric_norm = F.normalize(metric, p=2, dim=-1)
-            sim = metric_norm @ metric_norm.transpose(-1, -2)
-            energy = F.elu(sim - margin, alpha=1.0).mean(dim=-1)  # high = important (PiToMe)
-            e_min = energy.min(dim=-1, keepdim=True)[0]
-            e_max = energy.max(dim=-1, keepdim=True)[0]
-            energy_norm = (energy - e_min) / (e_max - e_min + 1e-8)
+        # PiToMe-style energy (density) score
+        metric_normalized = F.normalize(metric, p=2, dim=-1)
+        sim = metric_normalized @ metric_normalized.transpose(-1, -2)
+        energy = F.elu(sim - margin, alpha=1.0).mean(dim=-1)  # high = merge candidate
+        e_min = energy.min(dim=-1, keepdim=True)[0]
+        e_max = energy.max(dim=-1, keepdim=True)[0]
+        energy_denom = (e_max - e_min).clamp_min(1e-8)
+        energy_norm = (energy - e_min) / energy_denom
 
-        importance = topo_norm
-        if energy_norm is not None:
-            importance = (1 - ew) * topo_norm + ew * energy_norm
+        # Merge score: higher means "merge this token"
+        merge_score = (1 - energy_weight) * (1.0 - topo_norm) + energy_weight * energy_norm
 
-        # Sort tokens by importance (ascending -> merge least important)
-        indices = torch.argsort(importance, dim=-1, descending=False)
+        # Sort tokens by merge_score (descending -> merge first)
+        indices = torch.argsort(merge_score, dim=-1, descending=True)
 
         # ------------------------------------------------------------------ #
         # Merge pairing strategy
@@ -144,9 +148,6 @@ def tda_pitome_vision(
             # Split merge candidates into source and destination
             a_idx = merge_idx[:, ::2]   # Source tokens (will be merged)
             b_idx = merge_idx[:, 1::2]  # Destination tokens (receive merged content)
-            
-            # Compute similarity scores for merge matching
-            sim = metric_normalized @ metric_normalized.transpose(-1, -2)
             
             # Gather similarity scores for merge pairs
             scores = sim.gather(

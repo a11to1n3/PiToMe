@@ -169,5 +169,92 @@ class TestMergeUtilities:
             pytest.skip("TDA dependencies not installed")
 
 
+class TestTDAGeneralizationTheorem:
+    """Tests for theoretical guarantees: PiToMe reduction and topological refinement."""
+
+    def test_reduction_matches_pitome_pairwise(self):
+        """energy_weight=1 should recover PiToMe pairwise merge ordering/output."""
+        torch.manual_seed(0)
+        try:
+            from algo import pitome, tda_pitome
+        except ImportError:
+            pytest.skip("Algo modules not available")
+        if tda_pitome is None:
+            pytest.skip("tda_pitome module unavailable")
+
+        metric = torch.randn(1, 8, 16)
+        ratio = 0.5
+
+        merge_tda = tda_pitome.tda_pitome_vision(
+            metric=metric,
+            ratio=ratio,
+            class_token=False,
+            energy_weight=1.0,
+            merge_strategy="pairwise",
+            use_flood=False,
+            use_fast=False,
+        )
+        merge_pitome = pitome.merge.pitome_vision(
+            metric=metric,
+            ratio=ratio,
+            class_token=False,
+        )
+
+        # Token identities to detect ordering and aggregation
+        x = torch.arange(8, dtype=torch.float32).view(1, 8, 1)
+        merged_tda = merge_tda(x.clone(), mode="mean")
+        merged_pitome = merge_pitome(x.clone(), mode="mean")
+
+        assert merged_tda.shape == merged_pitome.shape
+        assert torch.allclose(merged_tda, merged_pitome, atol=1e-6)
+
+    def test_topology_refines_when_energy_flat(self):
+        """
+        When energy is flat but topology varies, alpha<1 should change ordering:
+        multiway+prune should drop the lowest persistence token.
+        """
+        try:
+            from algo import tda_pitome
+        except ImportError:
+            pytest.skip("tda_pitome module unavailable")
+        if tda_pitome is None:
+            pytest.skip("tda_pitome module unavailable")
+
+        class DummyScorer:
+            def __init__(self, scores: torch.Tensor):
+                self.scores = scores
+
+            def compute_scores(self, embeddings, return_numpy: bool = False):
+                out = self.scores
+                if embeddings.dim() == 3:
+                    out = out.unsqueeze(0).expand(embeddings.shape[0], -1)
+                if return_numpy:
+                    return out.cpu().numpy()
+                return out.to(embeddings.device)
+
+        # Flat energy: identical tokens; topology: distinct persistence scores
+        topo_scores = torch.tensor([0.9, 0.1, 0.5, 0.4, 0.2], dtype=torch.float32)
+        scorer = DummyScorer(topo_scores)
+        metric = torch.ones(1, 5, 4)  # identical vectors -> flat density
+
+        merge = tda_pitome.tda_pitome_vision(
+            metric=metric,
+            ratio=0.8,  # keep 4, merge 1
+            class_token=False,
+            scorer=scorer,
+            energy_weight=0.0,  # pure topology
+            merge_strategy="multiway",
+            use_flood=False,
+            use_fast=False,
+        )
+
+        x = torch.eye(5).unsqueeze(0)
+        merged = merge(x, mode="prune")  # anchors only
+        kept_indices = torch.argmax(merged[0], dim=-1).tolist()
+
+        # Lowest persistence token (index 1 with score 0.1) should be removed
+        assert 1 not in kept_indices
+        assert set(kept_indices) == {0, 2, 3, 4}
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

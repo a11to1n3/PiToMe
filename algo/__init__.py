@@ -21,4 +21,8 @@ from . import pitome, tome, dct, tofu
 from .DiffRate import DiffRate
 
 # Import TDA-PiToMe as a module with .patch attribute
-from . import tda_pitome
+try:
+    from . import tda_pitome
+except ImportError as e:
+    tda_pitome = None
+    print(f"Warning: Could not import tda_pitome: {e}")

@@ -66,6 +66,7 @@ class TDAPiToMeBlock(Block):
                 cached_scores=cached_scores,
                 energy_weight=self._info.get("energy_weight", 0.0),
                 margin=self._info.get("margin", 0.5),
+                merge_strategy=self._info.get("merge_strategy", "pairwise"),
             )
             
             # Track sources if requested

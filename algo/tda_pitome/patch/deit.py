@@ -73,6 +73,7 @@ def apply_patch(
     alpha: float = 0.3,  # 0.0 ≈ PiToMe density-only, 1.0 = pure persistence
     energy_weight: float = 0.0,  # 0.0 = pure PH, 1.0 = PiToMe energy (superset knob)
     margin: float = 0.5,
+    merge_strategy: str = "pairwise",  # "pairwise" or "multiway" (n-way anchors)
     scoring_mode: str = None,  # optional alias: "pitome" -> energy_weight=1, "tda" -> 0
 ):
     """
@@ -116,6 +117,7 @@ def apply_patch(
         "tda_scores": None,  # Will be computed once per forward pass
         "energy_weight": energy_weight,
         "margin": margin,
+        "merge_strategy": merge_strategy,
     }
     
     # Initialize model-level TDA scorer (computed once, not per-block)

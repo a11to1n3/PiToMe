@@ -27,6 +27,7 @@ def tda_pitome_vision(
     cached_scores: Optional[torch.Tensor] = None,  # Pre-computed scores for caching
     energy_weight: float = 0.0,  # 0 = pure topology, 1 = pure PiToMe energy (superset knob)
     margin: float = 0.5,
+    merge_strategy: str = "pairwise",  # "pairwise" (default, PiToMe-style) or "multiway" (n-way anchors)
 ) -> Callable:
     """
     TDA-based token merging for Vision Transformers.
@@ -122,38 +123,61 @@ def tda_pitome_vision(
 
         # Sort tokens by importance (ascending -> merge least important)
         indices = torch.argsort(importance, dim=-1, descending=False)
-        
-        # Split into merge candidates and protected tokens
-        merge_idx = indices[:, :2*r]
-        protected_idx = indices[:, 2*r:]
-        
-        # Split merge candidates into source and destination
-        a_idx = merge_idx[:, ::2]   # Source tokens (will be merged)
-        b_idx = merge_idx[:, 1::2]  # Destination tokens (receive merged content)
-        
-        # Compute similarity scores for merge matching
+
+        # ------------------------------------------------------------------ #
+        # Merge pairing strategy
+        # pairwise: legacy PiToMe-style bipartite pairing
+        # multiway: n-way generalization – keep top tokens as anchors, merge all others to best anchor
+        # ------------------------------------------------------------------ #
+        merge_strategy = merge_strategy.lower()
+        if merge_strategy not in ("pairwise", "multiway"):
+            merge_strategy = "pairwise"
+
         metric_normalized = F.normalize(metric, p=2, dim=-1)
-        sim = metric_normalized @ metric_normalized.transpose(-1, -2)
-        
-        # Get similarities between source and destination candidates
         batch_idx = torch.arange(B, device=metric.device).unsqueeze(1)
-        
-        # Gather similarity scores for merge pairs
-        scores = sim.gather(
-            dim=-1, 
-            index=b_idx.unsqueeze(-2).expand(B, T, r)
-        )
-        scores = scores.gather(
-            dim=-2, 
-            index=a_idx.unsqueeze(-1).expand(B, r, r)
-        )
-        
-        # Find best match for each source token
-        _, dst_idx = scores.max(dim=-1)  # [B, r]
+
+        if merge_strategy == "pairwise":
+            # Split into merge candidates and protected tokens
+            merge_idx = indices[:, :2*r]
+            protected_idx = indices[:, 2*r:]
+            
+            # Split merge candidates into source and destination
+            a_idx = merge_idx[:, ::2]   # Source tokens (will be merged)
+            b_idx = merge_idx[:, 1::2]  # Destination tokens (receive merged content)
+            
+            # Compute similarity scores for merge matching
+            sim = metric_normalized @ metric_normalized.transpose(-1, -2)
+            
+            # Gather similarity scores for merge pairs
+            scores = sim.gather(
+                dim=-1, 
+                index=b_idx.unsqueeze(-2).expand(B, T, r)
+            )
+            scores = scores.gather(
+                dim=-2, 
+                index=a_idx.unsqueeze(-1).expand(B, r, r)
+            )
+            
+            # Find best match for each source token
+            _, dst_idx = scores.max(dim=-1)  # [B, r]
+        else:
+            # n-way generalization: keep top tokens as anchors, merge all others to best anchor
+            keep = max(1, T - r)  # tokens to keep as anchors
+            merge_tokens = T - keep
+            anchors_idx = indices[:, -keep:]  # highest-importance tokens
+            merge_idx = indices[:, :merge_tokens] if merge_tokens > 0 else torch.empty(B, 0, device=metric.device, dtype=torch.long)
+
+            if merge_tokens > 0:
+                anchor_feats = metric_normalized[batch_idx, anchors_idx, :]  # [B, keep, C]
+                merge_feats = metric_normalized[batch_idx, merge_idx, :]     # [B, merge, C]
+                sim_to_anchor = merge_feats @ anchor_feats.transpose(-1, -2)  # [B, merge, keep]
+                assign_idx = sim_to_anchor.argmax(dim=-1)  # [B, merge]
+            else:
+                assign_idx = torch.empty(B, 0, device=metric.device, dtype=torch.long)
     
     def merge(x: torch.Tensor, mode: str = "mean") -> torch.Tensor:
         """
-        Apply token merging.
+        Apply token merging (pairwise or multiway).
         
         Args:
             x: [B, T, C] tokens to merge
@@ -162,35 +186,48 @@ def tda_pitome_vision(
         Returns:
             merged: [B, T', C] merged tokens where T' < T
         """
-        nonlocal r, a_idx, b_idx, dst_idx, protected_idx, batch_idx
-        
         # Handle CLS token
         if class_token:
             x_cls = x[:, 0, :].unsqueeze(1)
-            x = x[:, 1:, :]
+            x_work = x[:, 1:, :]
         else:
             x_cls = None
+            x_work = x
         
-        B, T, C = x.shape
-        
-        # Get source, destination, and protected tokens
-        protected = x[batch_idx, protected_idx, :]
-        src = x[batch_idx, a_idx, :]
-        dst = x[batch_idx, b_idx, :]
-        
-        if mode != "prune":
-            # Merge source into destination
-            dst = dst.scatter_reduce(
-                dim=-2,
-                index=dst_idx.unsqueeze(2).expand(B, r, C),
-                src=src,
-                reduce=mode
-            )
-        
-        # Concatenate: [CLS (if any)] + protected + merged destinations
+        B, Tcur, C = x_work.shape
+
+        if merge_strategy == "pairwise":
+            protected = x_work[batch_idx, protected_idx, :]
+            src = x_work[batch_idx, a_idx, :]
+            dst = x_work[batch_idx, b_idx, :]
+
+            if mode != "prune":
+                dst = dst.scatter_reduce(
+                    dim=-2,
+                    index=dst_idx.unsqueeze(2).expand(B, r, C),
+                    src=src,
+                    reduce=mode
+                )
+
+            merged_tokens = torch.cat([protected, dst], dim=1)
+        else:
+            if merge_idx.numel() == 0:
+                merged_tokens = x_work[batch_idx, anchors_idx, :]
+            else:
+                anchors = x_work[batch_idx, anchors_idx, :]  # [B, keep, C]
+                merges = x_work[batch_idx, merge_idx, :]    # [B, merge, C]
+                if mode != "prune":
+                    anchors = anchors.scatter_reduce(
+                        dim=1,
+                        index=assign_idx.unsqueeze(-1).expand(B, merge_idx.shape[1], C),
+                        src=merges,
+                        reduce=mode,
+                    )
+                merged_tokens = anchors
+
         if x_cls is not None:
-            return torch.cat([x_cls, protected, dst], dim=1)
-        return torch.cat([protected, dst], dim=1)
+            return torch.cat([x_cls, merged_tokens], dim=1)
+        return merged_tokens
     
     return merge
 

@@ -25,6 +25,8 @@ def tda_pitome_vision(
     use_fast: bool = False,
     use_flood: bool = True,  # Default to GPU-accelerated FloodComplex
     cached_scores: Optional[torch.Tensor] = None,  # Pre-computed scores for caching
+    energy_weight: float = 0.0,  # 0 = pure topology, 1 = pure PiToMe energy (superset knob)
+    margin: float = 0.5,
 ) -> Callable:
     """
     TDA-based token merging for Vision Transformers.
@@ -98,9 +100,28 @@ def tda_pitome_vision(
             # Higher score = more important = should be preserved
             topo_scores = scorer.compute_scores(metric)  # [B, T]
         
-        # Sort tokens by topological importance (ascending)
-        # Low-scoring tokens are merge candidates
-        indices = torch.argsort(topo_scores, dim=-1, descending=False)
+        # Normalize topo scores to [0, 1] for mixing with energy
+        topo_min = topo_scores.min(dim=-1, keepdim=True)[0]
+        topo_max = topo_scores.max(dim=-1, keepdim=True)[0]
+        topo_norm = (topo_scores - topo_min) / (topo_max - topo_min + 1e-8)
+
+        # Optional PiToMe energy scores for generalization
+        energy_norm = None
+        ew = max(0.0, min(1.0, float(energy_weight)))
+        if ew > 0.0:
+            metric_norm = F.normalize(metric, p=2, dim=-1)
+            sim = metric_norm @ metric_norm.transpose(-1, -2)
+            energy = F.elu(sim - margin, alpha=1.0).mean(dim=-1)  # high = important (PiToMe)
+            e_min = energy.min(dim=-1, keepdim=True)[0]
+            e_max = energy.max(dim=-1, keepdim=True)[0]
+            energy_norm = (energy - e_min) / (e_max - e_min + 1e-8)
+
+        importance = topo_norm
+        if energy_norm is not None:
+            importance = (1 - ew) * topo_norm + ew * energy_norm
+
+        # Sort tokens by importance (ascending -> merge least important)
+        indices = torch.argsort(importance, dim=-1, descending=False)
         
         # Split into merge candidates and protected tokens
         merge_idx = indices[:, :2*r]

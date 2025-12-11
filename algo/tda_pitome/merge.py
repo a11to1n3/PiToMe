@@ -29,6 +29,8 @@ def tda_pitome_vision(
     margin: float = 0.5,
     merge_strategy: str = "pairwise",  # "pairwise" (default, PiToMe-style) or "multiway" (n-way anchors)
     homology_dims: Optional[Union[int, tuple]] = None,  # Which homology dimensions to score (passed to scorer)
+    flood_landmark_fraction: Optional[float] = 0.05,  # Reduce landmark fraction for faster FloodComplex
+    flood_n_filtration_steps: Optional[int] = 30,  # Fewer filtration steps for speed
 ) -> Callable:
     """
     TDA-based token merging for Vision Transformers.
@@ -94,7 +96,11 @@ def tda_pitome_vision(
             # Initialize scorer if needed (FloodComplex by default for GPU)
             if scorer is None:
                 if use_flood:
-                    scorer = FloodComplexScorer(homology_dims=homology_dims)
+                    scorer = FloodComplexScorer(
+                        homology_dims=homology_dims,
+                        landmark_fraction=flood_landmark_fraction or 0.05,
+                        n_filtration_steps=flood_n_filtration_steps or 30,
+                    )
                 elif use_fast:
                     scorer = FastTopologicalScorer(homology_dims=homology_dims)
                 else:
